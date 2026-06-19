@@ -244,7 +244,7 @@ The entire application compiles into a single HTML file at approximately 446 kil
 
 ## Pricing
 
-This application is available for **$15 CAD**. Payment accepted via PayPal or Interac e-Transfer. Upon confirmation of payment, the HTML file will be sent to you directly via email. The source code is also freely available in this repository.
+This application is available for **$10 CAD**. Payment accepted via DONATION of crypto to   . Upon confirmation of payment, the HTML file will be sent to you directly via email. The source code is also freely available in this repository if you want to compile it yourself for free.
 
 **No refunds. No returns. No complaints.**
 
