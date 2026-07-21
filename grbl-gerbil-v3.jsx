@@ -381,7 +381,7 @@ function generateGcode(objects, layers, imageCache, opts = {}) {
           lines.push(`G1 X${obj.x2.toFixed(3)} Y${obj.y2.toFixed(3)} F${layer.speed}`);
           lines.push("M5 S0");
         } else if (obj.type === "text") {
-          lines.push(`; TEXT: "${obj.text}" at ${obj.x.toFixed(1)},${obj.y.toFixed(1)}`);
+          lines.push(textToGcodeLines(obj, layer).join("\n"));
         } else if (obj.type === "image") {
           lines.push(imageToGcodeLines(obj, layer, imageCache).join("\n"));
         }
@@ -393,6 +393,88 @@ function generateGcode(objects, layers, imageCache, opts = {}) {
   if (opts.returnHome !== false) lines.push("G0 X0 Y0 F3000 ; return home");
   lines.push("M2 ; end program");
   return lines.join("\n");
+}
+
+function textToGcodeLines(obj, layer) {
+  const text = (obj.text || "").toString();
+  if (!text.trim()) return ['; TEXT: empty'];
+  if (obj.pathType) return [`; TEXT on path not yet supported: "${text}"`];
+  if (typeof document === "undefined") return [`; TEXT skipped (no DOM): "${text}"`];
+
+  const pxPerMm = 4;
+  const mmPerPx = 1 / pxPerMm;
+  const fontMm = Math.max(1, Number(obj.textSize) || 14);
+  const fontPx = Math.max(8, Math.round(fontMm * pxPerMm));
+  const fontFamily = obj.fontFamily || "monospace";
+  const sVal = Math.round((layer.power / 100) * 255);
+
+  const measureCanvas = document.createElement("canvas");
+  const measureCtx = measureCanvas.getContext("2d");
+  if (!measureCtx) return [`; TEXT skipped (no canvas context): "${text}"`];
+  measureCtx.font = `${fontPx}px ${fontFamily}`;
+  const metrics = measureCtx.measureText(text);
+  const pad = Math.max(4, Math.ceil(fontPx * 0.25));
+  const widthPx = Math.max(1, Math.ceil(metrics.width || text.length * fontPx * 0.6));
+  const ascentPx = Math.max(1, Math.ceil(metrics.actualBoundingBoxAscent || fontPx * 0.8));
+  const descentPx = Math.max(1, Math.ceil(metrics.actualBoundingBoxDescent || fontPx * 0.2));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = widthPx + pad * 2;
+  canvas.height = ascentPx + descentPx + pad * 2;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return [`; TEXT skipped (no canvas context): "${text}"`];
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#000";
+  ctx.font = `${fontPx}px ${fontFamily}`;
+  ctx.textBaseline = "alphabetic";
+  const baselineY = pad + ascentPx;
+  ctx.fillText(text, pad, baselineY);
+
+  const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+  const lines = [`; TEXT toolpath: "${text}" ${fontMm.toFixed(1)}mm ${fontFamily}`];
+  const baseX = Number(obj.x) || 0;
+  const baseY = Number(obj.y) || 0;
+
+  for (let py = 0; py < canvas.height; py++) {
+    const mmY = baseY + (py - baselineY) * mmPerPx;
+    if (mmY < 0 || mmY > BED_H) continue;
+
+    const runs = [];
+    let runStart = -1;
+    for (let px = 0; px < canvas.width; px++) {
+      const i = (py * canvas.width + px) * 4;
+      const a = data[i + 3];
+      const lum = (data[i] + data[i + 1] + data[i + 2]) / 3;
+      const dark = a > 20 && lum < 235;
+      if (dark) {
+        if (runStart < 0) runStart = px;
+      } else if (runStart >= 0) {
+        runs.push([runStart, px - 1]);
+        runStart = -1;
+      }
+    }
+    if (runStart >= 0) runs.push([runStart, canvas.width - 1]);
+    if (!runs.length) continue;
+
+    const serpentine = py % 2 === 0 ? runs : runs.slice().reverse();
+    serpentine.forEach(([a, b]) => {
+      const xA = baseX + (a - pad) * mmPerPx;
+      const xB = baseX + (b - pad) * mmPerPx;
+      const x1 = py % 2 === 0 ? xA : xB;
+      const x2 = py % 2 === 0 ? xB : xA;
+      if ((x1 < 0 && x2 < 0) || (x1 > BED_W && x2 > BED_W)) return;
+      const sx = Math.max(0, Math.min(BED_W, x1));
+      const ex = Math.max(0, Math.min(BED_W, x2));
+      lines.push(`G0 X${sx.toFixed(3)} Y${mmY.toFixed(3)} F3000`);
+      lines.push(`M4 S${sVal}`);
+      lines.push(`G1 X${ex.toFixed(3)} F${layer.speed}`);
+      lines.push("M5 S0");
+    });
+  }
+
+  if (lines.length === 1) lines.push("; TEXT had no engravable pixels");
+  return lines;
 }
 
 function imageToGcodeLines(img, layer, imageCache) {
