@@ -1166,8 +1166,10 @@ export default function LaserMasterBlaster() {
   // ═══ FILE IMPORT ════════════════════════════════════════
   const importFile = async (file) => {
     const ext = file.name.split(".").pop().toLowerCase();
+    const mime = (file.type || "").toLowerCase();
+    const isSvg = ext === "svg" || mime === "image/svg+xml";
     log(`Importing ${file.name} (${(file.size/1024).toFixed(1)} KB)`);
-    if (ext === "svg") {
+    if (isSvg) {
       const text = await file.text();
       const newObjs = parseSVG(text, activeLayerId);
       const all = [...objects, ...newObjs];
@@ -2007,7 +2009,7 @@ export default function LaserMasterBlaster() {
 
   return (
     <div style={s.app}>
-      <input ref={fileInputRef} type="file" accept=".svg,.dxf,.png,.jpg,.jpeg,.bmp,.gif,.webp,.grbl,.json" style={{ display: "none" }}
+      <input ref={fileInputRef} type="file" accept=".svg,image/svg+xml,.dxf,.png,.jpg,.jpeg,.bmp,.gif,.webp,.grbl,.json" style={{ display: "none" }}
         onChange={async e => { for (const f of e.target.files) await importFile(f); e.target.value = ""; }}
         multiple />
       <input ref={loadProjectRef} type="file" accept=".grbl,.json" style={{ display: "none" }}
