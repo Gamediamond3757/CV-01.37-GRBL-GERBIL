@@ -398,7 +398,6 @@ function generateGcode(objects, layers, imageCache, opts = {}) {
 function textToGcodeLines(obj, layer) {
   const text = (obj.text || "").toString();
   if (!text.trim()) return ['; TEXT: empty'];
-  if (obj.pathType) return [`; TEXT on path not yet supported: "${text}"`];
   if (typeof document === "undefined") return [`; TEXT skipped (no DOM): "${text}"`];
 
   const pxPerMm = 4;
@@ -413,31 +412,92 @@ function textToGcodeLines(obj, layer) {
   if (!measureCtx) return [`; TEXT skipped (no canvas context): "${text}"`];
   measureCtx.font = `${fontPx}px ${fontFamily}`;
   const metrics = measureCtx.measureText(text);
-  const pad = Math.max(4, Math.ceil(fontPx * 0.25));
-  const widthPx = Math.max(1, Math.ceil(metrics.width || text.length * fontPx * 0.6));
   const ascentPx = Math.max(1, Math.ceil(metrics.actualBoundingBoxAscent || fontPx * 0.8));
   const descentPx = Math.max(1, Math.ceil(metrics.actualBoundingBoxDescent || fontPx * 0.2));
-
-  const canvas = document.createElement("canvas");
-  canvas.width = widthPx + pad * 2;
-  canvas.height = ascentPx + descentPx + pad * 2;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
-  if (!ctx) return [`; TEXT skipped (no canvas context): "${text}"`];
-
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = "#000";
-  ctx.font = `${fontPx}px ${fontFamily}`;
-  ctx.textBaseline = "alphabetic";
-  const baselineY = pad + ascentPx;
-  ctx.fillText(text, pad, baselineY);
-
-  const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-  const lines = [`; TEXT toolpath: "${text}" ${fontMm.toFixed(1)}mm ${fontFamily}`];
+  const glyphHeightPx = ascentPx + descentPx;
+  const pad = Math.max(4, Math.ceil(fontPx * 0.25));
   const baseX = Number(obj.x) || 0;
   const baseY = Number(obj.y) || 0;
 
+  let canvas;
+  let ctx;
+  let originXmm = 0;
+  let originYmm = 0;
+
+  if (obj.pathType && obj.pathType !== "circle") {
+    return [`; TEXT path type not supported: "${obj.pathType}" "${text}"`];
+  }
+
+  if (obj.pathType === "circle") {
+    const radiusMm = Math.max(1, Number(obj.pathR) || 30);
+    const radiusPx = Math.max(4, radiusMm * pxPerMm);
+    const glyphWidths = [...text].map(ch => {
+      const m = measureCtx.measureText(ch);
+      return Math.max(1, m.width || fontPx * 0.6);
+    });
+    const arcLenPx = glyphWidths.reduce((sum, w) => sum + w, 0);
+    const margin = Math.ceil(fontPx + pad);
+    const halfSize = Math.ceil(radiusPx + glyphHeightPx + margin);
+    const size = Math.max(32, halfSize * 2);
+    const cx = size / 2;
+    const cy = size / 2;
+    const startAngle = -Math.PI / 2 - (arcLenPx / radiusPx) / 2;
+    const pathCx = Number(obj.pathCx);
+    const pathCy = Number(obj.pathCy);
+    const centerMmX = Number.isFinite(pathCx) ? pathCx : baseX;
+    const centerMmY = Number.isFinite(pathCy) ? pathCy : baseY;
+
+    canvas = document.createElement("canvas");
+    canvas.width = size;
+    canvas.height = size;
+    ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return [`; TEXT skipped (no canvas context): "${text}"`];
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#000";
+    ctx.font = `${fontPx}px ${fontFamily}`;
+    ctx.textBaseline = "alphabetic";
+    ctx.textAlign = "left";
+
+    let cursorPx = 0;
+    [...text].forEach((ch, i) => {
+      const w = glyphWidths[i];
+      const midPx = cursorPx + w / 2;
+      const angle = startAngle + (midPx / radiusPx);
+      const tx = cx + Math.cos(angle) * radiusPx;
+      const ty = cy + Math.sin(angle) * radiusPx;
+      ctx.save();
+      ctx.translate(tx, ty);
+      ctx.rotate(angle + Math.PI / 2);
+      ctx.fillText(ch, -w / 2, 0);
+      ctx.restore();
+      cursorPx += w;
+    });
+
+    originXmm = centerMmX - (cx * mmPerPx);
+    originYmm = centerMmY - (cy * mmPerPx);
+  } else {
+    const widthPx = Math.max(1, Math.ceil(metrics.width || text.length * fontPx * 0.6));
+    const baselineY = pad + ascentPx;
+    canvas = document.createElement("canvas");
+    canvas.width = widthPx + pad * 2;
+    canvas.height = ascentPx + descentPx + pad * 2;
+    ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return [`; TEXT skipped (no canvas context): "${text}"`];
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#000";
+    ctx.font = `${fontPx}px ${fontFamily}`;
+    ctx.textBaseline = "alphabetic";
+    ctx.fillText(text, pad, baselineY);
+    originXmm = baseX - (pad * mmPerPx);
+    originYmm = baseY - (baselineY * mmPerPx);
+  }
+
+  const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+  const pathNote = obj.pathType === "circle" ? ` path=circle r=${Math.max(1, Number(obj.pathR) || 30).toFixed(1)}mm` : "";
+  const lines = [`; TEXT toolpath: "${text}" ${fontMm.toFixed(1)}mm ${fontFamily}${pathNote}`];
+
   for (let py = 0; py < canvas.height; py++) {
-    const mmY = baseY + (py - baselineY) * mmPerPx;
+    const mmY = originYmm + py * mmPerPx;
     if (mmY < 0 || mmY > BED_H) continue;
 
     const runs = [];
@@ -459,8 +519,8 @@ function textToGcodeLines(obj, layer) {
 
     const serpentine = py % 2 === 0 ? runs : runs.slice().reverse();
     serpentine.forEach(([a, b]) => {
-      const xA = baseX + (a - pad) * mmPerPx;
-      const xB = baseX + (b - pad) * mmPerPx;
+      const xA = originXmm + a * mmPerPx;
+      const xB = originXmm + b * mmPerPx;
       const x1 = py % 2 === 0 ? xA : xB;
       const x2 = py % 2 === 0 ? xB : xA;
       if ((x1 < 0 && x2 < 0) || (x1 > BED_W && x2 > BED_W)) return;
